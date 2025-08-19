@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
+<title>ブロック崩し（ザビエラー長谷川とたびお）</title>
+<style>
+  :root { --panel:#171a2b; --text:#e6e8f2; }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:#0b0e1a;color:var(--text);
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,"Hiragino Sans","Noto Sans JP","Yu Gothic",sans-serif;
+    display:grid;place-items:center;min-height:100vh
+  }
+  .wrap{width:min(980px,94vw)}
+  header{display:grid;gap:.6rem;grid-template-columns:1fr auto;align-items:center;margin:12px 0}
+  h1{margin:0;font-size:clamp(18px,2.6vw,24px)}
+  .controls{display:flex;gap:8px;flex-wrap:wrap}
+  button{
+    background:#171a2b;color:#e6e8f2;border:1px solid #2b3050;padding:8px 10px;border-radius:10px;font:inherit;cursor:pointer
+  }
+  .controls button.muted{opacity:.7; border-style:dashed}
+  .stat{display:flex;gap:10px;flex-wrap:wrap;background:#121426b8;border:1px solid #272b46;padding:6px 10px;border-radius:10px;font-variant-numeric:tabular-nums}
+  .canvas-wrap{position:relative;border:1px solid #2a2f4d;border-radius:16px;overflow:hidden;box-shadow:0 10px 30px #0008;background:#060814}
+  canvas{display:block;width:100%;height:auto}
+  .overlay{position:absolute;inset:0;display:none;place-items:center;pointer-events:none;text-align:center;padding:20px}
+  .overlay .panel{pointer-events:auto;background:#0b0e1acc;border:1px solid #2a2f4d;border-radius:14px;padding:18px 20px;max-width:min(92%,820px)}
+  .overlay h2{margin:0 0 10px;font-size:clamp(18px,3vw,24px)}
+  .overlay img{max-width:100%;height:auto;display:none;border-radius:12px}
+  footer{opacity:.75;font-size:12px;margin:10px 2px 0}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>ブロック崩し（ザビエラー長谷川とたびお）</h1>
+      <div class="controls">
+        <button id="btnStart">スタート / リスタート</button>
+        <button id="btnPause">ポーズ</button>
+        <button id="btnSound" aria-pressed="true" aria-label="サウンドON/OFF">🔊 サウンドON</button>
+        <span class="stat">
+          スコア:<strong id="score">0</strong>　
+          残機:<strong id="lives">3</strong>　
+          ステージ:<strong id="stage">1</strong>
+        </span>
+      </div>
+    </header>
+
+    <div class="canvas-wrap">
+      <canvas id="game" width="960" height="640" aria-label="ゲームキャンバス"></canvas>
+      <div class="overlay" id="overlay">
+        <div class="panel">
+          <h2 id="overlayTitle">準備OK</h2>
+          <p id="overlayMsg">スペース / スタートで開始。← → / マウス/タッチで操作。</p>
+          <img id="overlayImg" alt="ending" />
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      同じフォルダに <code>block.png</code>（600×360）、<code>grh.png</code>、<code>end.png</code>、<code>hit.mp3</code>、<code>clap.mp3</code> を置いてください。R: リスタート
+    </footer>
+  </div>
+
+<script>
+(() => {
+  // ===== 設定 =====
+  const BLOCK_IMG_SRC = 'block.png';   // 分割して壊す画像（600x360）
+  const BG_IMG_SRC    = 'grh.png';     // block.png と同じ位置・サイズで表示
+  const END_IMG_SRC   = 'end.png';     // 全破壊後に表示
+  const ROWS=6, COLS=10;
+  const IMAGE_SCALE=0.84;              // ブロック画像の見た目サイズ
+  const TOP_OFFSET=10, PLAY_AREA=360, PADDLE_GAP=140;
+
+  // 速度
+  const SPEED_MULT=38; // 速め（あなたが良い感じと言ってた設定）
+  const BASE = {
+    paddleW:110, paddleH:14, ballR:8,
+    startSpeed:5.3*SPEED_MULT, maxSpeed:14+3*SPEED_MULT
+  };
+
+  // ===== DOM =====
+  const canvas=document.getElementById('game');
+  const ctx=canvas.getContext('2d');
+  const scoreEl=document.getElementById('score');
+  const livesEl=document.getElementById('lives');
+  const stageEl=document.getElementById('stage');
+  const overlay=document.getElementById('overlay');
+  const overlayTitle=document.getElementById('overlayTitle');
+  const overlayMsg=document.getElementById('overlayMsg');
+  const overlayImg=document.getElementById('overlayImg');
+  const btnStart=document.getElementById('btnStart');
+  const btnPause=document.getElementById('btnPause');
+  const btnSound=document.getElementById('btnSound');
+
+  // ===== 効果音 =====
+  const seHit  = new Audio('hit.mp3');   seHit.volume  = 0.6; // ブロック破壊
+  const seClap = new Audio('clap.mp3');  seClap.volume = 0.7; // クリア時
+
+  // 音量ON/OFF状態（保存）
+  let soundOn = (localStorage.getItem('soundOn') ?? '1') === '1';
+  function applySoundState(){
+    seHit.muted  = !soundOn;
+    seClap.muted = !soundOn;
+    btnSound.classList.toggle('muted', !soundOn);
+    btnSound.setAttribute('aria-pressed', soundOn ? 'true' : 'false');
+    btnSound.textContent = soundOn ? '🔊 サウンドON' : '🔇 サウンドOFF';
+  }
+  applySoundState();
+
+  // ===== 状態 =====
+  let blockImg=null, bgImg=null, endImg=null;
+  let state={}, running=false, paused=false, lastTime=0;
+
+  // ===== ユーティリティ =====
+  const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+  const rand=(a,b)=>a+Math.random()*(b-a);
+  const bands=(t,p)=>Array.from({length:p+1},(_,i)=>Math.round(i*t/p));
+  function updateHUD(){ scoreEl.textContent=state.score; livesEl.textContent=state.lives; stageEl.textContent=state.stage; }
+  function showOverlay(t,m){ if(t!=null)overlayTitle.textContent=t; if(m!=null)overlayMsg.textContent=m; overlayImg.style.display='none'; overlay.style.display='grid'; }
+  function showOverlayWithImage(t, m, img){
+    overlayTitle.textContent = t ?? '';
+    overlayMsg.textContent   = m ?? '';
+    if(img){ overlayImg.src = img.src; overlayImg.style.display='block'; } else overlayImg.style.display='none';
+    overlay.style.display='grid';
+  }
+  function hideOverlay(){ overlay.style.display='none'; overlayImg.style.display='none'; }
+  function fitCanvasToCSSPixelSize(){
+    const ratio=window.devicePixelRatio||1, r=canvas.getBoundingClientRect();
+    const w=Math.floor(r.width), h=Math.floor(r.height);
+    if(canvas.width!==w*ratio||canvas.height!==h*ratio){ canvas.width=w*ratio; canvas.height=h*ratio; ctx.setTransform(ratio,0,0,ratio,0,0); }
+  }
+  function loadImage(src){ return new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=src; }); }
+  // 速度一定（正規化）
+  function keepSpeed(ball){
+    const m = Math.hypot(ball.dx, ball.dy) || 1;
+    const s = ball.targetSpeed ?? m;
+    const k = s / m;
+    ball.dx *= k; ball.dy *= k;
+  }
+
+  // ===== レイアウト & 初期化 =====
+  function layoutAndInit(keep=false, showReady=true){
+    const wrapW=document.querySelector('.canvas-wrap').clientWidth;
+    const Wcss=wrapW;
+    const imageW=Math.round(Wcss*IMAGE_SCALE);
+    const imageH=Math.round(imageW*(ROWS/COLS));
+    const Hcss=TOP_OFFSET+imageH+PLAY_AREA;
+
+    canvas.style.width=Wcss+'px';
+    canvas.style.height=Hcss+'px';
+    fitCanvasToCSSPixelSize();
+
+    const W=canvas.getBoundingClientRect().width;
+    const H=canvas.getBoundingClientRect().height;
+
+    const colB=bands(imageW,COLS), rowB=bands(imageH,ROWS);
+    const srcColB=bands((blockImg?.width??600),COLS);
+    const srcRowB=bands((blockImg?.height??360),ROWS);
+    const startX=Math.round((W-imageW)/2), startY=TOP_OFFSET;
+
+    const bricks=[];
+    for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+      bricks.push({
+        r,c, x:startX+colB[c], y:startY+rowB[r],
+        w:colB[c+1]-colB[c], h:rowB[r+1]-rowB[r],
+        alive:true,
+        sx:srcColB[c], sy:srcRowB[r],
+        sw:srcColB[c+1]-srcColB[c], sh:srcRowB[r+1]-srcRowB[r]
+      });
+    }
+
+    const paddle={ x:(W-BASE.paddleW)/2, y:startY+imageH+PADDLE_GAP, w:BASE.paddleW, h:BASE.paddleH, speed:22 };
+    const base=BASE.startSpeed*(W/960);
+    const s=Math.hypot(base,base);
+    const ball={ x:W*0.5, y:paddle.y-20, dx:(rand(-1,1)<0?-base:base), dy:-base,
+                 r:BASE.ballR, maxSpeed:BASE.maxSpeed*(W/960),
+                 targetSpeed:s };
+
+    keepSpeed(ball);
+
+    state = Object.assign(keep?state:{score:0,lives:3,stage:1},{
+      W,H,startX,startY,imageW,imageH, bricks, bricksLeft:bricks.length,
+      paddle, ball, keys:{left:false,right:false,a:false,d:false},
+      won:false, resumeReady:false, clapPlayed:false
+    });
+    updateHUD();
+    if(showReady) showOverlay('準備OK','スペース / スタートで開始。'); else hideOverlay();
+  }
+
+  // ===== 描画 =====
+  function drawBg(){
+    ctx.fillStyle='#060814'; ctx.fillRect(0,0,state.W,state.H);
+    if(bgImg){
+      ctx.drawImage(bgImg, state.startX, state.startY, state.imageW, state.imageH);
+    }
+  }
+  function drawBricks(){
+    for(const b of state.bricks){
+      if(!b.alive) continue;
+      if(blockImg) ctx.drawImage(blockImg, b.sx,b.sy,b.sw,b.sh, b.x,b.y,b.w,b.h);
+      else { ctx.fillStyle='#334'; ctx.fillRect(b.x,b.y,b.w,b.h); }
+    }
+  }
+  function drawPaddle(){ const p=state.paddle; ctx.fillStyle='#e2e5ff'; ctx.fillRect(p.x,p.y,p.w,p.h); }
+  function drawBall(){ const b=state.ball; ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fillStyle='#ffd166'; ctx.fill(); }
+
+  // ===== 物理 =====
+  function blockCollision(){
+    const b=state.ball;
+    for(const brick of state.bricks){
+      if(!brick.alive) continue;
+      if (b.x + b.r < brick.x || b.x - b.r > brick.x + brick.w ||
+          b.y + b.r < brick.y || b.y - b.r > brick.y + brick.h) continue;
+
+      const prevX=b.x - b.dx*0.010, prevY=b.y - b.dy*0.010;
+      const hitL=prevX <= brick.x - b.r, hitR=prevX >= brick.x + brick.w + b.r;
+      const hitT=prevY <= brick.y - b.r, hitB=prevY >= brick.y + brick.h + b.r;
+      if (hitL || hitR) b.dx*=-1; else if (hitT || hitB) b.dy*=-1; else b.dy*=-1;
+
+      keepSpeed(b);
+
+      // 効果音（ブロック破壊）
+      try { seHit.currentTime = 0; seHit.play(); } catch(e){}
+
+      brick.alive=false; state.bricksLeft--; state.score+=10; updateHUD();
+      break;
+    }
+  }
+
+  function update(dt){
+    const {W,H,paddle,ball,keys}=state;
+    keepSpeed(ball);
+
+    if(keys.left||keys.a)  paddle.x -= paddle.speed*dt*60;
+    if(keys.right||keys.d) paddle.x += paddle.speed*dt*60;
+    paddle.x = clamp(paddle.x, 0, W-paddle.w);
+
+    const steps=3;
+    for(let i=0;i<steps;i++){
+      ball.x += (ball.dx*dt)/steps;
+      ball.y += (ball.dy*dt)/steps;
+
+      if(ball.x - ball.r < 0){ ball.x=ball.r; ball.dx*=-1; keepSpeed(ball); }
+      if(ball.x + ball.r > W){ ball.x=W-ball.r; ball.dx*=-1; keepSpeed(ball); }
+      if(ball.y - ball.r < 0){ ball.y=ball.r; ball.dy*=-1; keepSpeed(ball); }
+
+      if (ball.y + ball.r >= paddle.y && ball.y + ball.r <= paddle.y + paddle.h &&
+          ball.x >= paddle.x && ball.x <= paddle.x + paddle.w && ball.dy > 0){
+        const hit=(ball.x-(paddle.x+paddle.w/2))/(paddle.w/2);
+        const angle=hit*(Math.PI*0.35);
+        const s = Math.min(ball.targetSpeed, ball.maxSpeed);
+        ball.dx=Math.sin(angle)*s;
+        ball.dy=-Math.cos(angle)*s;
+        ball.y=paddle.y - ball.r - 0.01;
+        keepSpeed(ball);
+      }
+
+      blockCollision();
+      if(state.bricksLeft===0) break;
+    }
+
+    // ミス：続きから or ゲームオーバー
+    if(ball.y - ball.r > H){
+      state.lives--; updateHUD(); running=false;
+      if(state.lives<=0){
+        showOverlay('ゲームオーバー','スタート / R で最初から');
+        state.resumeReady = false;
+      }else{
+        showOverlay('ミス','スタートで続きから再開（残機 '+state.lives+'）');
+        const base=BASE.startSpeed*(W/960), s=Math.hypot(base,base);
+        Object.assign(state.ball,{ x:W*0.5, y:state.paddle.y-20, dx:(rand(-1,1)<0?-base:base), dy:-base, targetSpeed:s });
+        keepSpeed(state.ball);
+        state.resumeReady = true;
+      }
+    }
+
+    // クリア：エンディング＋拍手
+    if(state.bricksLeft===0 && !state.won){
+      running=false; state.won=true;
+
+      if(!state.clapPlayed){
+        try { seClap.currentTime = 0; seClap.play(); } catch(e){}
+        state.clapPlayed = true;
+      }
+      showOverlayWithImage('おめでとう！','スタート / R で最初から', endImg);
+    }
+  }
+
+  // ===== ループ =====
+  function loop(ts){
+    if(!running || paused){ lastTime=ts; requestAnimationFrame(loop); return; }
+    const dt=Math.min(0.033,(ts-lastTime)/1000)||0.016; lastTime=ts;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    drawBg(); drawBricks(); drawPaddle(); drawBall(); update(dt);
+    requestAnimationFrame(loop);
+  }
+
+  // ===== 入力 / UI =====
+  function startGame(forceReset=false){
+    // ミス後の続きから
+    if(!forceReset && state.resumeReady && state.lives > 0 && !state.won){
+      hideOverlay(); state.resumeReady = false; running = true; paused = false; return;
+    }
+    // 新規 / 完全リスタート
+    hideOverlay();
+    state.clapPlayed=false;
+    if(forceReset || state.lives<=0 || state.won){
+      state.score=0; state.lives=3; state.stage=1; state.won=false;
+      layoutAndInit(false, /*showReady=*/false);
+    }else{
+      layoutAndInit(true,  /*showReady=*/false);
+    }
+    running=true; paused=false;
+  }
+  function togglePause(){ if(!running) return; paused=!paused; if(paused) showOverlay('ポーズ','スペース / ポーズで再開'); else hideOverlay(); }
+
+  window.addEventListener('keydown',e=>{
+    if(['ArrowLeft','ArrowRight','Space','KeyA','KeyD','KeyR'].includes(e.code)) e.preventDefault();
+    if(e.code==='ArrowLeft') state.keys.left=true;
+    if(e.code==='ArrowRight') state.keys.right=true;
+    if(e.code==='KeyA') state.keys.a=true;
+    if(e.code==='KeyD') state.keys.d=true;
+    if(e.code==='Space'){ if(!running) startGame(); else togglePause(); }
+    if(e.code==='KeyR') startGame(true);
+  });
+  window.addEventListener('keyup',e=>{
+    if(e.code==='ArrowLeft') state.keys.left=false;
+    if(e.code==='ArrowRight') state.keys.right=false;
+    if(e.code==='KeyA') state.keys.a=false;
+    if(e.code==='KeyD') state.keys.d=false;
+  });
+  canvas.addEventListener('pointermove',e=>{
+    const r=canvas.getBoundingClientRect();
+    state.paddle.x = clamp((e.clientX-r.left)-state.paddle.w/2, 0, state.W-state.paddle.w);
+  });
+
+  btnStart.addEventListener('click',()=>startGame());
+  btnPause.addEventListener('click',()=>togglePause());
+  btnSound.addEventListener('click',()=>{
+    soundOn = !soundOn;
+    localStorage.setItem('soundOn', soundOn ? '1':'0');
+    applySoundState();
+  });
+
+  // 起動時：画像読み込み
+  (async ()=>{
+    try{
+      [blockImg,bgImg,endImg]=await Promise.all([
+        loadImage(BLOCK_IMG_SRC), loadImage(BG_IMG_SRC), loadImage(END_IMG_SRC)
+      ]);
+    }catch{}
+    layoutAndInit(false,true);
+    showOverlay('準備OK','スペース / スタートで開始。');
+    requestAnimationFrame(loop);
+  })();
+
+  // リサイズ
+  window.addEventListener('resize',()=>{
+    const run=running;
+    layoutAndInit(true,!run);
+    const ratio=window.devicePixelRatio||1; ctx.setTransform(ratio,0,0,ratio,0,0);
+    if(run) hideOverlay();
+  });
+
+  // ブラウザの自動再生制限対策（最初の操作でAudioを解凍）
+  window.addEventListener('pointerdown', () => {
+    try { seHit.play().then(()=>seHit.pause()); } catch(e){}
+    try { seClap.play().then(()=>seClap.pause()); } catch(e){}
+  }, { once:true });
+
+})();
+</script>
+</body>
+</html>
+
