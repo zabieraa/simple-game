@@ -170,9 +170,9 @@
   // ===== 当たり判定の調整用パラメータ =====
   // 数字を下げるほど拾いにくく（=ミスになりやすく）なります
   const HIT_TUNE = {
-    edgeInflateRatio: 0.35, // 連続判定で広げる横幅（ボール半径×この割合）
-    rectInflateRatio: 0.20, // 矩形交差の横広げ幅（同上）
-    minOverlapPx: 4.5       // これ未満の“かすり”は無効
+    edgeInflateRatio: 0.15, // 連続判定で広げる横幅（ボール半径×この割合）
+    rectInflateRatio: 0.10, // 矩形交差の横広げ幅（同上）
+    minOverlapPx: 5.5       // これ未満の“かすり”は無効
   };
 
   // ===== DOM =====
@@ -521,7 +521,7 @@
     const moveY = ball.dy * dt;
     const dist  = Math.hypot(moveX, moveY);
     // 半径の0.7ごとに1ステップ（以前は0.5）／最低3ステップ
-    const steps = Math.max(3, Math.ceil(dist / Math.max(1, ball.r * 0.7)));
+    const steps = Math.max(3, Math.ceil(dist / Math.max(1, ball.r * 0.9)));
 
     for(let i=0;i<steps;i++){
       const prevX = ball.x;
